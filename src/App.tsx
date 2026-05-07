@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent, WheelEvent } from "react";
+import { PaletteTile } from "./components/PaletteTile";
+import { useBoardImages } from "./hooks/useBoardImages";
+import { useBoardHistory } from "./hooks/useBoardHistory";
+import { useSavedProjects } from "./hooks/useSavedProjects";
 import { exportBoard } from "./lib/exportBoard";
-import { loadImageFiles } from "./lib/imageFiles";
+import { cleanCustomLayerOrder } from "./lib/boardImages";
 import {
   computePositions,
   getAspectRatioCss,
@@ -12,39 +16,18 @@ import {
   getRatioBox,
   getRenderedImages,
   getTileVisual,
-  paletteCustomLayoutKey,
 } from "./lib/layout";
-import { defaultPalette, extractPalette, isDark } from "./lib/palette";
+import { defaultPalette, isDark } from "./lib/palette";
+import {
+  loadSavedDebugLayout,
+  loadSavedSettings,
+  loadSavedTheme,
+  saveDebugLayout,
+  saveSettings,
+  saveTheme,
+} from "./lib/storage";
+import type { ThemeMode } from "./lib/storage";
 import type { AspectRatio, BoardImage, BoardSettings, ClusterFlow, ExportFormat, ExportQuality, ImageOutlineMode, LayoutMode, PaletteTileStyle } from "./lib/types";
-
-const initialSettings: BoardSettings = {
-  layout: "balanced",
-  clusterFlow: "rows",
-  aspectRatio: "4:3",
-  count: 9,
-  spacing: 14,
-  radius: 12,
-  imageOutline: 0,
-  imageOutlineMode: "inner",
-  imageOutlineColor: "#ffffff",
-  imageFit: "fill",
-  background: "#ffffff",
-  trimBackground: false,
-  includePalette: false,
-  paletteTileStyle: "bars",
-  paletteTileIndex: -1,
-  customLayout: {},
-  customLayerOrder: [],
-  showPaletteHexLabels: false,
-  showHeader: false,
-  header: "imgmood",
-  headerStyle: "modern",
-  headerAlign: "left",
-  headerSize: 42,
-  exportFormat: "png",
-  exportQuality: "high",
-  filename: "imgmood",
-};
 
 const layouts: Array<{ value: LayoutMode; label: string; hint: string }> = [
   { value: "balanced", label: "Balanced", hint: "Best default" },
@@ -91,34 +74,13 @@ const outlineModeOptions: Array<{ value: ImageOutlineMode; label: string }> = [
 ];
 const outlineColors = ["#ffffff", "#f6f3ec", "#111111", "#d9c5a7", "#2457d6"];
 
-const settingsStorageKey = "imgmood-settings-v1";
-const themeStorageKey = "imgmood-theme-v1";
-const debugStorageKey = "imgmood-debug-layout-v1";
-const legacySettingsStorageKey = "imgboard-settings-v1";
-const legacyThemeStorageKey = "imgboard-theme-v1";
-const legacyDebugStorageKey = "imgboard-debug-layout-v1";
-
 type ExportStatus = "idle" | "exporting" | "done";
-type ThemeMode = "warm" | "dark";
 type MarqueeRect = { x: number; y: number; w: number; h: number };
-type BoardSnapshot = { images: BoardImage[]; palette: string[]; settings: BoardSettings };
-type SavedProjectImage = Omit<BoardImage, "image">;
-type SavedProject = {
-  version: 1;
-  id: string;
-  name: string;
-  updatedAt: number;
-  images: SavedProjectImage[];
-  palette: string[];
-  settings: BoardSettings;
-};
-type SavedProjectMeta = Pick<SavedProject, "id" | "name" | "updatedAt"> & { imageCount: number };
 
 const themeOptions: Array<{ value: ThemeMode; label: string }> = [
   { value: "warm", label: "Warm" },
   { value: "dark", label: "Dark" },
 ];
-const historyLimit = 80;
 
 export default function App() {
   const [images, setImages] = useState<BoardImage[]>([]);
@@ -127,11 +89,6 @@ export default function App() {
   const [theme, setTheme] = useState<ThemeMode>(loadSavedTheme);
   const [debugLayout, setDebugLayout] = useState(loadSavedDebugLayout);
   const [message, setMessage] = useState("");
-  const [undoStack, setUndoStack] = useState<BoardSnapshot[]>([]);
-  const [redoStack, setRedoStack] = useState<BoardSnapshot[]>([]);
-  const [savedProjects, setSavedProjects] = useState<SavedProjectMeta[]>([]);
-  const [selectedProjectId, setSelectedProjectId] = useState("");
-  const [activeProjectId, setActiveProjectId] = useState("");
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const [isDraggingBoardFiles, setIsDraggingBoardFiles] = useState(false);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
@@ -146,7 +103,6 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const railDragDepthRef = useRef(0);
   const cancelBoardNameEditRef = useRef(false);
-  const autoSaveTimeoutRef = useRef<number | null>(null);
   const cropDragRef = useRef<{ id: string; startX: number; startY: number; cropX: number; cropY: number; moveX: number; moveY: number; historyCaptured: boolean } | null>(null);
   const customDragRef = useRef<{
     index: number;
@@ -169,6 +125,38 @@ export default function App() {
     direction: number;
     lastWheelAt: number;
   } | null>(null);
+
+  const { undoStack, redoStack, pushUndo, commitBoard, undoBoard, redoBoard } = useBoardHistory({
+    images,
+    palette,
+    settings,
+    selectedImageIds,
+    setImages,
+    setPalette,
+    setSettings,
+    setSelectedImageId,
+    setSelectedImageIds,
+    setCropModalImageId,
+    setMessage,
+  });
+
+  const {
+    savedProjects,
+    selectedProjectId,
+    activeProjectId,
+    activeProjectName,
+    saveProject,
+    loadProjectById,
+    deleteSelectedProject,
+    saveActiveProjectSettings,
+    clearActiveProject,
+  } = useSavedProjects({
+    images,
+    palette,
+    settings,
+    commitBoard,
+    setMessage,
+  });
 
   const renderedImages = useMemo(() => getRenderedImages(images, settings), [images, settings]);
   const hasBoardTitle = settings.showHeader && Boolean(settings.header.trim());
@@ -218,11 +206,39 @@ export default function App() {
   const showsPaletteDetails = settings.includePalette;
   const showsPaletteHexLabels = settings.includePalette && settings.paletteTileStyle !== "strip" && settings.paletteTileStyle !== "minimal";
   const paletteSlotIndex = getPaletteSlotIndex(renderedImages.length, settings);
+  const {
+    addFiles,
+    selectImages,
+    selectImage,
+    toggleImageSelection,
+    updateImageCrop,
+    featureImage,
+    removeImage,
+    clearImages,
+    createNewBoard,
+    getImageIndexForSlot,
+    moveBoardTile,
+    regenerate,
+  } = useBoardImages({
+    images,
+    palette,
+    settings,
+    selectedImageId,
+    selectedImageIds,
+    paletteSlotIndex,
+    commitBoard,
+    setImages,
+    setMessage,
+    setSelectedImageId,
+    setSelectedImageIds,
+    setCropModalImageId,
+    clearActiveProject,
+    freezeVisibleCustomLayout,
+  });
   const selectedImageIdSet = useMemo(() => new Set(selectedImageIds), [selectedImageIds]);
   const selectedImage = selectedImageId ? images.find((image) => image.id === selectedImageId) : null;
   const cropModalImage = cropModalImageId ? images.find((image) => image.id === cropModalImageId) : null;
   const cropFrame = cropModalImage ? getCropFrame(cropModalImage, cropModalAspect) : null;
-  const activeProjectName = savedProjects.find((project) => project.id === activeProjectId)?.name;
   const boardName = settings.filename.trim() || activeProjectName || "Untitled board";
   const railMessage = images.length ? "" : message;
 
@@ -234,41 +250,20 @@ export default function App() {
   }, [positions]);
 
   useEffect(() => {
-    window.localStorage.setItem(settingsStorageKey, JSON.stringify(settings));
+    saveSettings(settings);
   }, [settings]);
 
   useEffect(() => {
-    window.localStorage.setItem(themeStorageKey, theme);
+    saveTheme(theme);
   }, [theme]);
 
   useEffect(() => {
-    window.localStorage.setItem(debugStorageKey, debugLayout ? "1" : "0");
+    saveDebugLayout(debugLayout);
   }, [debugLayout]);
 
   useEffect(() => {
     setBoardNameDraft(settings.filename);
   }, [settings.filename]);
-
-  useEffect(() => {
-    void refreshSavedProjects();
-  }, []);
-
-  useEffect(() => {
-    if (!activeProjectId || !images.length) return;
-    if (autoSaveTimeoutRef.current !== null) window.clearTimeout(autoSaveTimeoutRef.current);
-    autoSaveTimeoutRef.current = window.setTimeout(() => {
-      const project = createProject(getProjectName(settings, activeProjectName), activeProjectId);
-      void putSavedProject(project)
-        .then(refreshSavedProjects)
-        .then(() => setSelectedProjectId(project.id))
-        .catch(() => setMessage("Project could not be auto-saved."));
-      autoSaveTimeoutRef.current = null;
-    }, 700);
-
-    return () => {
-      if (autoSaveTimeoutRef.current !== null) window.clearTimeout(autoSaveTimeoutRef.current);
-    };
-  }, [activeProjectId, activeProjectName, images, palette, settings]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -287,157 +282,7 @@ export default function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [images, palette, redoStack, selectedImageIds, settings, undoStack]);
-
-  function cloneSettings(settingsValue: BoardSettings): BoardSettings {
-    return { ...settingsValue, customLayout: { ...settingsValue.customLayout }, customLayerOrder: [...settingsValue.customLayerOrder] };
-  }
-
-  function cloneImages(imageList: BoardImage[]) {
-    return imageList.map((image) => ({ ...image }));
-  }
-
-  function cloneSnapshot(snapshot: BoardSnapshot): BoardSnapshot {
-    return {
-      images: cloneImages(snapshot.images),
-      palette: [...snapshot.palette],
-      settings: cloneSettings(snapshot.settings),
-    };
-  }
-
-  function getSnapshot(): BoardSnapshot {
-    return cloneSnapshot({ images, palette, settings });
-  }
-
-  function restoreSnapshot(snapshot: BoardSnapshot) {
-    const next = cloneSnapshot(snapshot);
-    setImages(next.images);
-    setPalette(next.palette);
-    setSettings(next.settings);
-    const validSelection = selectedImageIds.filter((id) => next.images.some((image) => image.id === id));
-    const nextSelectedIds = validSelection.length ? validSelection : next.images[0]?.id ? [next.images[0].id] : [];
-    setSelectedImageIds(nextSelectedIds);
-    setSelectedImageId(nextSelectedIds[nextSelectedIds.length - 1] ?? null);
-    setCropModalImageId((cropping) => (cropping && next.images.some((image) => image.id === cropping) ? cropping : null));
-  }
-
-  function pushUndo(snapshot: BoardSnapshot = getSnapshot()) {
-    setUndoStack((current) => [...current, cloneSnapshot(snapshot)].slice(-historyLimit));
-    setRedoStack([]);
-  }
-
-  function commitBoard(snapshot: BoardSnapshot, nextMessage?: string) {
-    pushUndo();
-    restoreSnapshot(snapshot);
-    if (nextMessage !== undefined) setMessage(nextMessage);
-  }
-
-  function undoBoard() {
-    setUndoStack((current) => {
-      const previous = current[current.length - 1];
-      if (!previous) return current;
-      setRedoStack((redo) => [...redo, getSnapshot()].slice(-historyLimit));
-      restoreSnapshot(previous);
-      setMessage("Undid last change.");
-      return current.slice(0, -1);
-    });
-  }
-
-  function redoBoard() {
-    setRedoStack((current) => {
-      const next = current[current.length - 1];
-      if (!next) return current;
-      setUndoStack((undo) => [...undo, getSnapshot()].slice(-historyLimit));
-      restoreSnapshot(next);
-      setMessage("Redid last change.");
-      return current.slice(0, -1);
-    });
-  }
-
-  function createProject(name: string, id = activeProjectId || createProjectId(), snapshot: BoardSnapshot = { images, palette, settings }): SavedProject {
-    return {
-      version: 1,
-      id,
-      name,
-      updatedAt: Date.now(),
-      images: snapshot.images.map(({ image: _image, ...rest }) => rest),
-      palette: snapshot.palette,
-      settings: snapshot.settings,
-    };
-  }
-
-  async function refreshSavedProjects() {
-    try {
-      const projects = await listSavedProjects();
-      setSavedProjects(projects);
-      setSelectedProjectId((current) => (current && projects.some((project) => project.id === current) ? current : projects[0]?.id ?? ""));
-    } catch {
-      setMessage("Saved projects could not be read.");
-    }
-  }
-
-  async function saveProject() {
-    if (!images.length) return;
-    const projectName = getProjectName(settings, savedProjects.find((project) => project.id === activeProjectId)?.name);
-    try {
-      const project = createProject(projectName);
-      await putSavedProject(project);
-      setActiveProjectId(project.id);
-      await refreshSavedProjects();
-      setSelectedProjectId(project.id);
-      setMessage(`Saved "${project.name}".`);
-    } catch {
-      setMessage("Project could not be saved.");
-    }
-  }
-
-  async function loadProjectById(projectId: string) {
-    if (!projectId) return;
-    setSelectedProjectId(projectId);
-    try {
-      const project = await getSavedProject(projectId);
-      if (!project) throw new Error("Missing project.");
-      setMessage("Loading project...");
-      await applySavedProject(project);
-    } catch {
-      setMessage("Project could not be loaded.");
-    }
-  }
-
-  async function deleteSelectedProject() {
-    if (!selectedProjectId) return;
-    const deletedId = selectedProjectId;
-    try {
-      await deleteSavedProject(deletedId);
-      if (activeProjectId === deletedId) setActiveProjectId("");
-      await refreshSavedProjects();
-      setMessage("Project deleted.");
-    } catch {
-      setMessage("Project could not be deleted.");
-    }
-  }
-
-  async function applySavedProject(project: SavedProject) {
-    try {
-      const nextImages = await Promise.all(project.images.slice(0, 20).map(loadProjectImage));
-      const nextSettings = normalizeProjectSettings(project.settings);
-      commitBoard(
-        {
-          images: nextImages,
-          palette: project.palette.length ? project.palette : defaultPalette,
-          settings: {
-            ...nextSettings,
-            count: nextImages.length > 1 ? Math.min(Math.max(nextSettings.count, 1), nextImages.length) : nextImages.length ? 6 : 9,
-          },
-        },
-        `Loaded "${project.name}".`,
-      );
-      setActiveProjectId(project.id);
-      setSelectedProjectId(project.id);
-    } catch {
-      setMessage("Project could not be loaded.");
-    }
-  }
+  }, [redoBoard, undoBoard]);
 
   function updateSettings(patch: Partial<BoardSettings>) {
     commitBoard({ images, palette, settings: { ...settings, ...patch, customLayout: patch.customLayout ?? settings.customLayout, customLayerOrder: patch.customLayerOrder ?? settings.customLayerOrder } });
@@ -454,62 +299,11 @@ export default function App() {
     const nextSettings = { ...settings, filename: nextName };
     commitBoard({ images, palette, settings: nextSettings });
 
-    if (!activeProjectId || !images.length) return;
-    try {
-      const project = createProject(getProjectName(nextSettings, activeProjectName), activeProjectId, { images, palette, settings: nextSettings });
-      await putSavedProject(project);
-      await refreshSavedProjects();
-      setSelectedProjectId(project.id);
-    } catch {
-      setMessage("Board was renamed, but the saved project name could not be updated.");
-    }
+    await saveActiveProjectSettings(nextSettings);
   }
 
   function updatePalette(nextPalette: string[]) {
     commitBoard({ images, palette: nextPalette, settings });
-  }
-
-  async function addFiles(fileList: FileList | File[], mode: "append" | "replace" = images.length ? "append" : "replace") {
-    if (mode === "append" && images.length >= 20) {
-      setMessage("Remove an image before adding more.");
-      return;
-    }
-
-    const files = Array.from(fileList);
-    setMessage("");
-    const result = await loadImageFiles(files);
-    if (!result.images.length) {
-      setMessage(result.message);
-      return;
-    }
-
-    const nextImages = mode === "append" ? [...images, ...result.images].slice(0, 20) : result.images;
-    const changedCount = mode === "append" ? nextImages.length - images.length : nextImages.length;
-    const nextMessage = changedCount ? "" : "Board already has 20 images.";
-    commitBoard(
-      {
-        images: nextImages,
-        palette: extractPalette(nextImages),
-        settings: {
-          ...settings,
-          count: nextImages.length > 1 ? nextImages.length : 6,
-          customLayout: mode === "replace" ? {} : settings.customLayout,
-          customLayerOrder: mode === "replace" ? [] : cleanCustomLayerOrder(settings.customLayerOrder, nextImages),
-        },
-      },
-      nextMessage,
-    );
-    selectImage(selectedImageId && nextImages.some((image) => image.id === selectedImageId) ? selectedImageId : nextImages[0]?.id ?? null);
-  }
-
-  function selectImages(ids: string[]) {
-    const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
-    setSelectedImageIds(uniqueIds);
-    setSelectedImageId(uniqueIds[uniqueIds.length - 1] ?? null);
-  }
-
-  function selectImage(id: string | null) {
-    selectImages(id ? [id] : []);
   }
 
   function getCurrentCustomLayerKeys() {
@@ -529,23 +323,6 @@ export default function App() {
 
   function bringCustomTileToFront(index: number) {
     bringCustomKeysToFront([getCustomLayoutKey(index, renderedImages, paletteSlotIndex)]);
-  }
-
-  function toggleImageSelection(id: string) {
-    setSelectedImageIds((current) => {
-      const next = current.includes(id) ? current.filter((itemId) => itemId !== id) : [...current, id];
-      setSelectedImageId(next[next.length - 1] ?? null);
-      return next;
-    });
-  }
-
-  function updateImageCrop(id: string, patch: Partial<Pick<BoardImage, "cropX" | "cropY">>, recordHistory = true) {
-    const nextImages = images.map((item) => (item.id === id ? { ...item, ...patch } : item));
-    if (recordHistory) {
-      commitBoard({ images: nextImages, palette, settings });
-      return;
-    }
-    setImages((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
   }
 
   function normalizeCustomRect(settingsValue: BoardSettings, rect: { x: number; y: number; w: number; h: number }) {
@@ -885,87 +662,6 @@ export default function App() {
     cropDragRef.current = null;
     event.currentTarget.releasePointerCapture(event.pointerId);
     if (cropModalImageId === croppedId) setCropModalImageId(null);
-  }
-
-  function featureImage(index: number) {
-    const previous = images;
-    const next = [...previous];
-    const [item] = next.splice(index, 1);
-    if (!item) return;
-    const featured: BoardImage = { ...item, size: "feature" };
-    const reordered = [featured, ...next];
-    const frozenLayout = freezeVisibleCustomLayout(settings.customLayout, settings);
-    commitBoard({ images: reordered, palette, settings: { ...settings, customLayout: remapCustomLayout(frozenLayout, previous, reordered), customLayerOrder: cleanCustomLayerOrder(settings.customLayerOrder, reordered) } });
-  }
-
-  function removeImage(index: number) {
-    const previous = images;
-    const next = previous.filter((_, itemIndex) => itemIndex !== index);
-    const nextSelectedIds = selectedImageIds.filter((id) => next.some((image) => image.id === id));
-    const frozenLayout = freezeVisibleCustomLayout(settings.customLayout, settings);
-    commitBoard({
-      images: next,
-      palette: next.length ? extractPalette(next) : defaultPalette,
-      settings: {
-        ...settings,
-        count: next.length > 1 ? Math.min(settings.count, next.length) : next.length ? 6 : 9,
-        customLayout: remapCustomLayout(frozenLayout, previous, next),
-        customLayerOrder: cleanCustomLayerOrder(settings.customLayerOrder, next),
-      },
-    });
-    selectImages(nextSelectedIds.length ? nextSelectedIds : next[0]?.id ? [next[0].id] : []);
-    setCropModalImageId((cropping) => (cropping && next.some((image) => image.id === cropping) ? cropping : null));
-  }
-
-  function clearImages() {
-    commitBoard({ images: [], palette: defaultPalette, settings: { ...settings, count: 9, customLayout: {}, customLayerOrder: [] } }, "");
-    setActiveProjectId("");
-    selectImage(null);
-    setCropModalImageId(null);
-  }
-
-  function createNewBoard() {
-    if (autoSaveTimeoutRef.current !== null) {
-      window.clearTimeout(autoSaveTimeoutRef.current);
-      autoSaveTimeoutRef.current = null;
-    }
-    commitBoard({ images: [], palette: defaultPalette, settings: { ...initialSettings, customLayout: {}, customLayerOrder: [] } }, "");
-    setActiveProjectId("");
-    selectImage(null);
-    setCropModalImageId(null);
-  }
-
-  function moveImage(from: number, to: number) {
-    if (from === to || from < 0 || to < 0 || from >= images.length || to >= images.length) return;
-    const previous = images;
-    const next = [...previous];
-    const [item] = next.splice(from, 1);
-    next.splice(to, 0, item);
-    const frozenLayout = freezeVisibleCustomLayout(settings.customLayout, settings);
-    commitBoard({ images: next, palette, settings: { ...settings, customLayout: remapCustomLayout(frozenLayout, previous, next), customLayerOrder: cleanCustomLayerOrder(settings.customLayerOrder, next) } });
-  }
-
-  function getImageIndexForSlot(slotIndex: number) {
-    return slotIndex - (paletteSlotIndex >= 0 && slotIndex > paletteSlotIndex ? 1 : 0);
-  }
-
-  function moveBoardTile(from: number, to: number) {
-    if (from === to) return;
-    const fromPalette = from === paletteSlotIndex;
-    const toPalette = to === paletteSlotIndex;
-
-    if (fromPalette || toPalette) {
-      updateSettings({ paletteTileIndex: fromPalette ? to : from });
-      return;
-    }
-
-    moveImage(getImageIndexForSlot(from), getImageIndexForSlot(to));
-  }
-
-  function regenerate() {
-    const next = shuffle(images);
-    const frozenLayout = freezeVisibleCustomLayout(settings.customLayout, settings);
-    commitBoard({ images: next, palette, settings: { ...settings, customLayout: remapCustomLayout(frozenLayout, images, next), customLayerOrder: cleanCustomLayerOrder(settings.customLayerOrder, next) } });
   }
 
   async function handleExport() {
@@ -1682,29 +1378,6 @@ export default function App() {
   );
 }
 
-function PaletteTile({ palette, showLabels, style }: { palette: string[]; showLabels: boolean; style: PaletteTileStyle }) {
-  if (style === "strip") {
-    return (
-      <div
-        className="palette-tile strip"
-        style={{ background: `linear-gradient(90deg, ${palette.map((color, index) => `${color} ${(index / palette.length) * 100}% ${((index + 1) / palette.length) * 100}%`).join(", ")})` }}
-      />
-    );
-  }
-
-  return (
-    <div className={`palette-tile ${style}${showLabels ? " show-labels" : ""}`}>
-      <div className="palette-tile-list">
-        {palette.map((color) => (
-          <div className={isDark(color) ? "palette-tile-row dark" : "palette-tile-row"} key={color} style={{ background: color }}>
-            <b>{color.toUpperCase()}</b>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function UploadIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1730,35 +1403,6 @@ function ResizeIcon() {
       <path d="M13 8h3v3" />
     </svg>
   );
-}
-
-function shuffle<T>(items: T[]) {
-  const next = [...items];
-  for (let i = next.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [next[i], next[j]] = [next[j], next[i]];
-  }
-  return next;
-}
-
-function remapCustomLayout(customLayout: BoardSettings["customLayout"], previous: BoardImage[], next: BoardImage[]) {
-  const byImageId = new Map<string, BoardSettings["customLayout"][string]>();
-  previous.forEach((image, index) => {
-    const rect = customLayout[image.id] ?? customLayout[String(index)];
-    if (rect) byImageId.set(image.id, rect);
-  });
-
-  return next.reduce<BoardSettings["customLayout"]>((layout, image, index) => {
-    if (index === 0 && customLayout[paletteCustomLayoutKey]) layout[paletteCustomLayoutKey] = customLayout[paletteCustomLayoutKey];
-    const rect = byImageId.get(image.id);
-    if (rect) layout[image.id] = rect;
-    return layout;
-  }, {});
-}
-
-function cleanCustomLayerOrder(order: string[] = [], images: BoardImage[]) {
-  const validIds = new Set(images.map((image) => image.id));
-  return order.filter((key) => key === paletteCustomLayoutKey || validIds.has(key) || validIds.has(key.split(":")[0]));
 }
 
 function hasImageFiles(dataTransfer: DataTransfer) {
@@ -1839,224 +1483,6 @@ function getCropFrame(image: BoardImage, frameAspect: number) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
-}
-
-function loadSavedSettings() {
-  try {
-    const saved = window.localStorage.getItem(settingsStorageKey) ?? window.localStorage.getItem(legacySettingsStorageKey);
-    if (!saved) return initialSettings;
-    const parsed = JSON.parse(saved) as Omit<Partial<BoardSettings>, "layout"> & { layout?: string };
-    const layout = parsed.layout === "collage" || parsed.layout === "scrapbook" ? "cluster" : parsed.layout;
-    return {
-      ...initialSettings,
-      ...parsed,
-      layout: (layout ?? initialSettings.layout) as LayoutMode,
-      customLayout: parsed.customLayout ?? {},
-      customLayerOrder: parsed.customLayerOrder ?? [],
-      imageFit: "fill" as const,
-    };
-  } catch {
-    return initialSettings;
-  }
-}
-
-function loadSavedTheme(): ThemeMode {
-  try {
-    const saved = window.localStorage.getItem(themeStorageKey) ?? window.localStorage.getItem(legacyThemeStorageKey);
-    return saved === "dark" ? "dark" : "warm";
-  } catch {
-    return "warm";
-  }
-}
-
-function loadSavedDebugLayout() {
-  try {
-    return (window.localStorage.getItem(debugStorageKey) ?? window.localStorage.getItem(legacyDebugStorageKey)) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function normalizeProjectSettings(settings: BoardSettings) {
-  const validLayouts: LayoutMode[] = ["balanced", "grid", "editorial", "feature", "cluster", "custom"];
-  const layout = validLayouts.includes(settings.layout) ? settings.layout : initialSettings.layout;
-  return {
-    ...initialSettings,
-    ...settings,
-    layout,
-    customLayout: settings.customLayout ?? {},
-    customLayerOrder: settings.customLayerOrder ?? [],
-  };
-}
-
-function loadProjectImage(saved: SavedProjectImage): Promise<BoardImage> {
-  return new Promise((resolve, reject) => {
-    if (!saved.url || typeof saved.url !== "string") {
-      reject(new Error("Missing image data."));
-      return;
-    }
-
-    const image = new Image();
-    image.onload = () => {
-      resolve({
-        ...saved,
-        id: saved.id || `img-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        name: saved.name || "Imported image",
-        image,
-        width: image.width || saved.width || 1,
-        height: image.height || saved.height || 1,
-        size: saved.size || "normal",
-        cropX: Number.isFinite(saved.cropX) ? saved.cropX : 50,
-        cropY: Number.isFinite(saved.cropY) ? saved.cropY : 50,
-      });
-    };
-    image.onerror = reject;
-    image.src = saved.url;
-  });
-}
-
-function getProjectName(settings: BoardSettings, fallback?: string) {
-  const rawName = settings.filename || settings.header || fallback || "Untitled board";
-  return rawName.trim() || "Untitled board";
-}
-
-function createProjectId() {
-  return window.crypto?.randomUUID?.() ?? `project-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-const projectDbName = "imgmood-projects";
-const legacyProjectDbName = "imgboard-projects";
-
-function openProjectDb(name = projectDbName): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(name, 1);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains("projects")) db.createObjectStore("projects", { keyPath: "id" });
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function listSavedProjects(): Promise<SavedProjectMeta[]> {
-  const db = await openProjectDb();
-  return new Promise((resolve, reject) => {
-    const request = db.transaction("projects", "readonly").objectStore("projects").getAll();
-    request.onsuccess = () => {
-      const projects = (request.result as SavedProject[])
-        .map((project) => ({ id: project.id, name: project.name, updatedAt: project.updatedAt, imageCount: project.images.length }))
-        .sort((a, b) => b.updatedAt - a.updatedAt);
-      db.close();
-      if (projects.length) {
-        resolve(projects);
-        return;
-      }
-      void listLegacySavedProjects().then(resolve, reject);
-    };
-    request.onerror = () => {
-      reject(request.error);
-      db.close();
-    };
-  });
-}
-
-async function listLegacySavedProjects(): Promise<SavedProjectMeta[]> {
-  const db = await openProjectDb(legacyProjectDbName);
-  return new Promise((resolve, reject) => {
-    const request = db.transaction("projects", "readonly").objectStore("projects").getAll();
-    request.onsuccess = () => {
-      const projects = (request.result as SavedProject[])
-        .map((project) => ({ id: project.id, name: project.name, updatedAt: project.updatedAt, imageCount: project.images.length }))
-        .sort((a, b) => b.updatedAt - a.updatedAt);
-      resolve(projects);
-      db.close();
-    };
-    request.onerror = () => {
-      reject(request.error);
-      db.close();
-    };
-  });
-}
-
-async function getSavedProject(id: string): Promise<SavedProject | null> {
-  const db = await openProjectDb();
-  return new Promise((resolve, reject) => {
-    const request = db.transaction("projects", "readonly").objectStore("projects").get(id);
-    request.onsuccess = () => {
-      db.close();
-      const project = (request.result as SavedProject | undefined) ?? null;
-      if (project) {
-        resolve(project);
-        return;
-      }
-      void getLegacySavedProject(id).then(resolve, reject);
-    };
-    request.onerror = () => {
-      reject(request.error);
-      db.close();
-    };
-  });
-}
-
-async function getLegacySavedProject(id: string): Promise<SavedProject | null> {
-  const db = await openProjectDb(legacyProjectDbName);
-  return new Promise((resolve, reject) => {
-    const request = db.transaction("projects", "readonly").objectStore("projects").get(id);
-    request.onsuccess = () => {
-      resolve((request.result as SavedProject | undefined) ?? null);
-      db.close();
-    };
-    request.onerror = () => {
-      reject(request.error);
-      db.close();
-    };
-  });
-}
-
-async function putSavedProject(project: SavedProject) {
-  const db = await openProjectDb();
-  return new Promise<void>((resolve, reject) => {
-    const request = db.transaction("projects", "readwrite").objectStore("projects").put(project);
-    request.onsuccess = () => {
-      resolve();
-      db.close();
-    };
-    request.onerror = () => {
-      reject(request.error);
-      db.close();
-    };
-  });
-}
-
-async function deleteSavedProject(id: string) {
-  const db = await openProjectDb();
-  return new Promise<void>((resolve, reject) => {
-    const request = db.transaction("projects", "readwrite").objectStore("projects").delete(id);
-    request.onsuccess = () => {
-      db.close();
-      void deleteLegacySavedProject(id).finally(resolve);
-    };
-    request.onerror = () => {
-      reject(request.error);
-      db.close();
-    };
-  });
-}
-
-async function deleteLegacySavedProject(id: string) {
-  const db = await openProjectDb(legacyProjectDbName);
-  return new Promise<void>((resolve, reject) => {
-    const request = db.transaction("projects", "readwrite").objectStore("projects").delete(id);
-    request.onsuccess = () => {
-      resolve();
-      db.close();
-    };
-    request.onerror = () => {
-      reject(request.error);
-      db.close();
-    };
-  });
 }
 
 function getReadableInk(background: string) {
