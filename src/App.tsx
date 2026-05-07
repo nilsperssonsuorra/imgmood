@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent, WheelEvent } from "react";
+import { CropModal } from "./components/CropModal";
+import { ImageRail } from "./components/ImageRail";
 import { PaletteTile } from "./components/PaletteTile";
+import { SettingsInspector } from "./components/SettingsInspector";
+import { Topbar } from "./components/Topbar";
+import { CloseIcon, ResizeIcon, UploadIcon } from "./components/icons";
 import { useBoardImages } from "./hooks/useBoardImages";
 import { useBoardHistory } from "./hooks/useBoardHistory";
 import { useSavedProjects } from "./hooks/useSavedProjects";
@@ -17,7 +22,22 @@ import {
   getRenderedImages,
   getTileVisual,
 } from "./lib/layout";
-import { defaultPalette, isDark } from "./lib/palette";
+import { defaultPalette } from "./lib/palette";
+import {
+  clamp,
+  getAspectNumber,
+  getCropFrame,
+  getPositionBounds,
+  getPreviewTitleHeight,
+  getPreviewTitleXSpace,
+  getPreviewWidth,
+  getReadableInk,
+  getTitleInnerPad,
+  getTitleSafeInset,
+  hasImageFiles,
+  rectsIntersect,
+} from "./lib/preview";
+import type { MarqueeRect } from "./lib/preview";
 import {
   loadSavedDebugLayout,
   loadSavedSettings,
@@ -27,60 +47,9 @@ import {
   saveTheme,
 } from "./lib/storage";
 import type { ThemeMode } from "./lib/storage";
-import type { AspectRatio, BoardImage, BoardSettings, ClusterFlow, ExportFormat, ExportQuality, ImageOutlineMode, LayoutMode, PaletteTileStyle } from "./lib/types";
-
-const layouts: Array<{ value: LayoutMode; label: string; hint: string }> = [
-  { value: "balanced", label: "Balanced", hint: "Best default" },
-  { value: "grid", label: "Grid", hint: "Even tiles" },
-  { value: "editorial", label: "Editorial", hint: "Magazine feel" },
-  { value: "feature", label: "Feature", hint: "One lead image" },
-  { value: "cluster", label: "Cluster", hint: "Centered board" },
-  { value: "custom", label: "Custom", hint: "Drag freely" },
-];
-
-const backgrounds = ["#ffffff", "#f6f3ec", "#ebe6dc", "#e7e9ee", "#181818"];
-const aspectOptions: AspectRatio[] = ["16:9", "4:3", "1:1", "3:4", "9:16"];
-const paletteTileStyles: Array<{ value: PaletteTileStyle; label: string }> = [
-  { value: "bars", label: "Bars" },
-  { value: "swatches", label: "Swatches" },
-  { value: "strip", label: "Strip" },
-  { value: "minimal", label: "Minimal" },
-];
-const exportFormats: Array<{ value: ExportFormat; label: string }> = [
-  { value: "png", label: "PNG" },
-  { value: "pdf", label: "PDF" },
-];
-
-const exportQualities: Array<{ value: ExportQuality; label: string; hint: string }> = [
-  { value: "standard", label: "Standard", hint: "Small file" },
-  { value: "high", label: "High", hint: "Best default" },
-  { value: "print", label: "Print", hint: "Large export" },
-];
-
-const titleAlignments: Array<{ value: BoardSettings["headerAlign"]; label: string }> = [
-  { value: "left", label: "Left" },
-  { value: "center", label: "Center" },
-  { value: "right", label: "Right" },
-];
-
-const clusterFlowOptions: Array<{ value: ClusterFlow; label: string }> = [
-  { value: "rows", label: "Rows" },
-  { value: "columns", label: "Columns" },
-];
-const outlineModeOptions: Array<{ value: ImageOutlineMode; label: string }> = [
-  { value: "inner", label: "Inner" },
-  { value: "center", label: "Center" },
-  { value: "outer", label: "Outer" },
-];
-const outlineColors = ["#ffffff", "#f6f3ec", "#111111", "#d9c5a7", "#2457d6"];
+import type { BoardImage, BoardSettings } from "./lib/types";
 
 type ExportStatus = "idle" | "exporting" | "done";
-type MarqueeRect = { x: number; y: number; w: number; h: number };
-
-const themeOptions: Array<{ value: ThemeMode; label: string }> = [
-  { value: "warm", label: "Warm" },
-  { value: "dark", label: "Dark" },
-];
 
 export default function App() {
   const [images, setImages] = useState<BoardImage[]>([]);
@@ -201,10 +170,6 @@ export default function App() {
   const countMax = images.length > 1 ? images.length : 12;
   const canExport = images.length > 0;
   const isSeamless = settings.spacing === 0;
-  const showsDirectionControls = settings.layout === "balanced" || settings.layout === "cluster" || settings.layout === "custom";
-  const showsOutlineControls = settings.imageOutline > 0;
-  const showsPaletteDetails = settings.includePalette;
-  const showsPaletteHexLabels = settings.includePalette && settings.paletteTileStyle !== "strip" && settings.paletteTileStyle !== "minimal";
   const paletteSlotIndex = getPaletteSlotIndex(renderedImages.length, settings);
   const {
     addFiles,
@@ -212,7 +177,6 @@ export default function App() {
     selectImage,
     toggleImageSelection,
     updateImageCrop,
-    featureImage,
     removeImage,
     clearImages,
     createNewBoard,
@@ -236,7 +200,6 @@ export default function App() {
     freezeVisibleCustomLayout,
   });
   const selectedImageIdSet = useMemo(() => new Set(selectedImageIds), [selectedImageIds]);
-  const selectedImage = selectedImageId ? images.find((image) => image.id === selectedImageId) : null;
   const cropModalImage = cropModalImageId ? images.find((image) => image.id === cropModalImageId) : null;
   const cropFrame = cropModalImage ? getCropFrame(cropModalImage, cropModalAspect) : null;
   const boardName = settings.filename.trim() || activeProjectName || "Untitled board";
@@ -686,101 +649,20 @@ export default function App() {
 
   return (
     <div className={`app-shell theme-${theme}${debugLayout ? " debug-layout" : ""}`}>
-      <header className="topbar">
-        <div className="brand-lockup">
-          <a className="brand" href="/" aria-label="imgmood home">
-            <span>imgmood</span>
-            <em>.com</em>
-          </a>
-        </div>
-        <div className="topbar-actions">
-          <div className="theme-switcher" role="group" aria-label="Editor theme">
-            {themeOptions.map((option) => (
-              <button
-                className={theme === option.value ? "theme-button selected" : "theme-button"}
-                key={option.value}
-                type="button"
-                onClick={() => setTheme(option.value)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-          <span className={canExport ? "status ready" : "status"}>{canExport ? `${renderedImages.length} images ready` : "Waiting for images"}</span>
-        </div>
-      </header>
+      <Topbar theme={theme} canExport={canExport} renderedImageCount={renderedImages.length} onThemeChange={setTheme} />
 
       <main className="workspace">
-        <aside
-          className={isDraggingFiles ? "image-rail dragging-files" : "image-rail"}
-          aria-label="Images"
-          onDragEnter={(event) => {
-            if (!hasImageFiles(event.dataTransfer)) return;
-            event.preventDefault();
-            railDragDepthRef.current += 1;
-            setIsDraggingFiles(true);
-          }}
-          onDragOver={(event) => {
-            if (!hasImageFiles(event.dataTransfer)) return;
-            event.preventDefault();
-          }}
-          onDragLeave={() => {
-            railDragDepthRef.current = Math.max(0, railDragDepthRef.current - 1);
-            if (railDragDepthRef.current === 0) setIsDraggingFiles(false);
-          }}
-          onDrop={(event) => {
-            if (!hasImageFiles(event.dataTransfer)) return;
-            event.preventDefault();
-            railDragDepthRef.current = 0;
-            setIsDraggingFiles(false);
-            void addFiles(event.dataTransfer.files);
-          }}
-        >
-          <input
-            ref={fileInputRef}
-            className="file-input-hidden"
-            type="file"
-            accept="image/png,image/jpeg,image/webp"
-            multiple
-            onChange={(event) => {
-              if (event.target.files) void addFiles(event.target.files);
-              event.currentTarget.value = "";
-            }}
-          />
-
-          <section className="rail-section">
-            <div className="section-title">
-              <h2>Images</h2>
-              <div className="section-actions">
-                <span>{images.length}/20</span>
-                <button className="text-button" type="button" onClick={() => fileInputRef.current?.click()}>
-                  Add
-                </button>
-                {images.length ? (
-                  <button className="text-button" type="button" onClick={clearImages}>
-                    Clear
-                  </button>
-                ) : null}
-              </div>
-            </div>
-            {railMessage ? <p className="message">{railMessage}</p> : null}
-            <div className="source-list">
-              {images.length ? (
-                images.map((item, index) => (
-                  <div className="source-item" key={item.id}>
-                    <img src={item.url} alt={item.name} />
-                    <span>{index + 1}</span>
-                    <button className="source-remove-button" type="button" title="Remove image" aria-label={`Remove ${item.name}`} onClick={() => removeImage(index)}>
-                      <CloseIcon />
-                    </button>
-                  </div>
-                ))
-              ) : (
-                <p className="empty-note">Your images stay in the browser.</p>
-              )}
-            </div>
-          </section>
-        </aside>
+        <ImageRail
+          images={images}
+          railMessage={railMessage}
+          fileInputRef={fileInputRef}
+          railDragDepthRef={railDragDepthRef}
+          isDraggingFiles={isDraggingFiles}
+          setIsDraggingFiles={setIsDraggingFiles}
+          addFiles={addFiles}
+          clearImages={clearImages}
+          removeImage={removeImage}
+        />
 
         <section className="stage" aria-label="imgmood workspace">
           <div className="stage-toolbar">
@@ -1052,439 +934,36 @@ export default function App() {
           </div>
         </section>
 
-        <aside className="inspector" aria-label="Settings">
-          <div className="inspector-scroll">
-            <section className="inspector-section">
-              <div className="section-title">
-                <h2>Layout</h2>
-                <button className="text-button" type="button" disabled={!images.length} onClick={regenerate}>
-                  Regenerate
-                </button>
-              </div>
-              <div className="layout-grid">
-                {layouts.map((layout) => (
-                  <button
-                    className={settings.layout === layout.value ? "layout-option selected" : "layout-option"}
-                    key={layout.value}
-                    type="button"
-                    onClick={() => updateSettings({ layout: layout.value })}
-                  >
-                    <span>{layout.label}</span>
-                    <small>{layout.hint}</small>
-                  </button>
-                ))}
-              </div>
-              {showsDirectionControls ? (
-                <div className="cluster-flow-control">
-                  <span>Direction</span>
-                  <div className="cluster-flow-options" role="group" aria-label="Layout direction">
-                    {clusterFlowOptions.map((option) => (
-                      <button
-                        className={settings.clusterFlow === option.value ? "cluster-flow-button selected" : "cluster-flow-button"}
-                        key={option.value}
-                        type="button"
-                        onClick={() => updateSettings({ clusterFlow: option.value })}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-            </section>
-
-            <section className="inspector-section compact-controls">
-              <div className="control-block">
-                <span>Aspect</span>
-                <div className="aspect-options" role="group" aria-label="Aspect ratio">
-                  {aspectOptions.map((aspect) => (
-                    <button
-                      className={settings.aspectRatio === aspect ? "aspect-button selected" : "aspect-button"}
-                      key={aspect}
-                      type="button"
-                      onClick={() => updateSettings({ aspectRatio: aspect })}
-                    >
-                      {aspect}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <label>
-                <span>Images</span>
-                <output>{settings.count}</output>
-                <input type="range" min="1" max={countMax} value={Math.min(settings.count, countMax)} onChange={(event) => updateSettings({ count: Number(event.target.value) })} />
-              </label>
-              <label>
-                <span>Spacing</span>
-                <output>{settings.spacing}px</output>
-                <input type="range" min="0" max="32" value={settings.spacing} onChange={(event) => updateSettings({ spacing: Number(event.target.value) })} />
-              </label>
-              <label>
-                <span>Radius</span>
-                <output>{settings.radius}px</output>
-                <input type="range" min="0" max="28" value={settings.radius} onChange={(event) => updateSettings({ radius: Number(event.target.value) })} />
-              </label>
-              <label>
-                <span>Image outline</span>
-                <output>{settings.imageOutline}px</output>
-                <input type="range" min="0" max="18" value={settings.imageOutline} onChange={(event) => updateSettings({ imageOutline: Number(event.target.value) })} />
-              </label>
-              {showsOutlineControls ? (
-                <>
-                  <div className="control-block contextual-control">
-                    <span>Outline position</span>
-                    <div className="outline-mode-options" role="group" aria-label="Image outline position">
-                      {outlineModeOptions.map((option) => (
-                        <button
-                          className={settings.imageOutlineMode === option.value ? "outline-mode-button selected" : "outline-mode-button"}
-                          key={option.value}
-                          type="button"
-                          onClick={() => updateSettings({ imageOutlineMode: option.value })}
-                        >
-                          {option.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="control-block contextual-control">
-                    <span>Outline color</span>
-                    <div className="outline-color-row">
-                      {outlineColors.map((color) => (
-                        <button
-                          aria-label={`Set outline ${color}`}
-                          className={settings.imageOutlineColor === color ? "mini-swatch selected" : "mini-swatch"}
-                          key={color}
-                          style={{ background: color }}
-                          type="button"
-                          onClick={() => updateSettings({ imageOutlineColor: color })}
-                        />
-                      ))}
-                      <input
-                        aria-label="Custom outline color"
-                        className="color-input"
-                        type="color"
-                        value={settings.imageOutlineColor}
-                        onChange={(event) => updateSettings({ imageOutlineColor: event.target.value })}
-                      />
-                    </div>
-                  </div>
-                </>
-              ) : null}
-            </section>
-
-            <section className="inspector-section">
-              <div className="section-title">
-                <h2>Style</h2>
-              </div>
-              <div className="swatch-row">
-                {backgrounds.map((color) => (
-                  <button
-                    aria-label={`Set background ${color}`}
-                    className={settings.background === color ? "swatch selected" : "swatch"}
-                    key={color}
-                    style={{ background: color }}
-                    type="button"
-                    onClick={() => updateSettings({ background: color })}
-                  />
-                ))}
-              </div>
-              <label className="toggle">
-                <span>Trim background</span>
-                <input type="checkbox" checked={settings.trimBackground} onChange={(event) => updateSettings({ trimBackground: event.target.checked })} />
-              </label>
-              <label className="toggle">
-                <span>Board title</span>
-                <input type="checkbox" checked={settings.showHeader} onChange={(event) => updateSettings({ showHeader: event.target.checked })} />
-              </label>
-              {settings.showHeader ? (
-                <div className="contextual-stack">
-                  <input className="text-input" value={settings.header} maxLength={60} onChange={(event) => updateSettings({ header: event.target.value })} />
-                  <select value={settings.headerStyle} onChange={(event) => updateSettings({ headerStyle: event.target.value as BoardSettings["headerStyle"] })}>
-                    <option value="modern">Modern Sans</option>
-                    <option value="serif">Classic Serif</option>
-                    <option value="editorial">Editorial Display</option>
-                    <option value="caption">Small Caps</option>
-                  </select>
-                  <div className="title-align-options" role="group" aria-label="Title alignment">
-                    {titleAlignments.map((alignment) => (
-                      <button
-                        className={settings.headerAlign === alignment.value ? "title-align-button selected" : "title-align-button"}
-                        key={alignment.value}
-                        type="button"
-                        onClick={() => updateSettings({ headerAlign: alignment.value })}
-                      >
-                        {alignment.label}
-                      </button>
-                    ))}
-                  </div>
-                  <label className="title-size-control">
-                    <span>Title size</span>
-                    <output>{settings.headerSize}px</output>
-                    <input
-                      type="range"
-                      min="24"
-                      max="76"
-                      value={settings.headerSize}
-                      onChange={(event) => updateSettings({ headerSize: Number(event.target.value) })}
-                    />
-                  </label>
-                </div>
-              ) : null}
-            </section>
-
-            <section className="inspector-section">
-              <div className="section-title">
-                <h2>Palette</h2>
-                {showsPaletteDetails ? (
-                  <button className="text-button" type="button" onClick={() => updatePalette([...palette, palette[palette.length - 1] ?? "#ffffff"])}>
-                    Add color
-                  </button>
-                ) : null}
-              </div>
-              <label className="toggle">
-                <span>Add palette tile</span>
-                <input type="checkbox" checked={settings.includePalette} onChange={(event) => updateSettings({ includePalette: event.target.checked })} />
-              </label>
-              {showsPaletteDetails ? (
-                <div className="contextual-stack">
-                  <div className="palette-editor">
-                    {palette.map((color, index) => (
-                      <div className="palette-row" key={`${color}-${index}`}>
-                        <input type="color" value={color} onChange={(event) => updatePalette(palette.map((item, itemIndex) => (itemIndex === index ? event.target.value : item)))} />
-                        <button type="button" onClick={() => void navigator.clipboard?.writeText(color.toUpperCase())}>
-                          {color.toUpperCase()}
-                        </button>
-                        <button type="button" disabled={palette.length <= 1} onClick={() => updatePalette(palette.filter((_, itemIndex) => itemIndex !== index))}>
-                          -
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="palette-style-options" role="group" aria-label="Palette tile style">
-                    {paletteTileStyles.map((style) => (
-                      <button
-                        className={settings.paletteTileStyle === style.value ? "palette-style-button selected" : "palette-style-button"}
-                        key={style.value}
-                        type="button"
-                        onClick={() => updateSettings({ includePalette: true, paletteTileStyle: style.value })}
-                      >
-                        {style.label}
-                      </button>
-                    ))}
-                  </div>
-                  {showsPaletteHexLabels ? (
-                    <label className="toggle">
-                      <span>Show hex labels</span>
-                      <input
-                        type="checkbox"
-                        checked={settings.showPaletteHexLabels}
-                        onChange={(event) => updateSettings({ showPaletteHexLabels: event.target.checked })}
-                      />
-                    </label>
-                  ) : null}
-                </div>
-              ) : null}
-            </section>
-
-            <section className="inspector-section">
-              <div className="section-title">
-                <h2>Export</h2>
-                <small>{exportSize.width}x{exportSize.height}</small>
-              </div>
-              <div className="export-format-options" role="group" aria-label="Export format">
-                {exportFormats.map((format) => (
-                  <button
-                    className={settings.exportFormat === format.value ? "export-format-button selected" : "export-format-button"}
-                    key={format.value}
-                    type="button"
-                    onClick={() => updateSettings({ exportFormat: format.value })}
-                  >
-                    {format.label}
-                  </button>
-                ))}
-              </div>
-              <div className="export-quality-options" role="group" aria-label="Export quality">
-                {exportQualities.map((quality) => (
-                  <button
-                    className={settings.exportQuality === quality.value ? "export-quality-button selected" : "export-quality-button"}
-                    key={quality.value}
-                    type="button"
-                    onClick={() => updateSettings({ exportQuality: quality.value })}
-                  >
-                    <span>{quality.label}</span>
-                    <small>{quality.hint}</small>
-                  </button>
-                ))}
-              </div>
-            </section>
-          </div>
-          <div className="inspector-footer">
-            <div className="history-actions">
-              <button className="ghost-button compact" type="button" disabled={!undoStack.length} onClick={undoBoard}>
-                Undo
-              </button>
-              <button className="ghost-button compact" type="button" disabled={!redoStack.length} onClick={redoBoard}>
-                Redo
-              </button>
-            </div>
-            <button className="primary-button export-button" type="button" disabled={!canExport || exportStatus === "exporting"} onClick={handleExport}>
-              {exportButtonLabel}
-            </button>
-          </div>
-        </aside>
+        <SettingsInspector
+          imagesLength={images.length}
+          palette={palette}
+          settings={settings}
+          countMax={countMax}
+          exportSize={exportSize}
+          canExport={canExport}
+          isExporting={exportStatus === "exporting"}
+          exportButtonLabel={exportButtonLabel}
+          undoCount={undoStack.length}
+          redoCount={redoStack.length}
+          updateSettings={updateSettings}
+          updatePalette={updatePalette}
+          regenerate={regenerate}
+          undoBoard={undoBoard}
+          redoBoard={redoBoard}
+          handleExport={handleExport}
+        />
       </main>
       {cropModalImage ? (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setCropModalImageId(null)}>
-          <div className="crop-modal" role="dialog" aria-modal="true" aria-label="Crop image" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="crop-modal-header">
-              <div>
-                <h2>Crop image</h2>
-                <p>{cropModalImage.name}</p>
-              </div>
-              <button className="modal-close-button" type="button" aria-label="Close crop editor" onClick={() => setCropModalImageId(null)}>
-                <CloseIcon />
-              </button>
-            </div>
-            <div
-              className="crop-modal-stage"
-              style={{ "--image-aspect": cropModalImage.width / cropModalImage.height } as React.CSSProperties}
-            >
-              <img src={cropModalImage.url} alt={cropModalImage.name} draggable={false} />
-              {cropFrame ? (
-                <div
-                  className="crop-frame"
-                  style={{
-                    left: `${cropFrame.left}%`,
-                    top: `${cropFrame.top}%`,
-                    width: `${cropFrame.width}%`,
-                    height: `${cropFrame.height}%`,
-                  }}
-                  onPointerDown={(event) => startCropDrag(event, cropModalImage)}
-                  onPointerMove={moveCropDrag}
-                  onPointerUp={stopCropDrag}
-                  onPointerCancel={stopCropDrag}
-                />
-              ) : null}
-            </div>
-            <div className="crop-modal-actions">
-              <button className="ghost-button" type="button" onClick={() => updateImageCrop(cropModalImage.id, { cropX: 50, cropY: 50 })}>
-                Reset
-              </button>
-            </div>
-          </div>
-        </div>
+        <CropModal
+          image={cropModalImage}
+          cropFrame={cropFrame}
+          onClose={() => setCropModalImageId(null)}
+          onReset={() => updateImageCrop(cropModalImage.id, { cropX: 50, cropY: 50 })}
+          onStartCropDrag={startCropDrag}
+          onMoveCropDrag={moveCropDrag}
+          onStopCropDrag={stopCropDrag}
+        />
       ) : null}
     </div>
   );
-}
-
-function UploadIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 3v11m0-11 4 4m-4-4-4 4" />
-      <path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4" />
-    </svg>
-  );
-}
-
-function CloseIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M18 6 6 18M6 6l12 12" />
-    </svg>
-  );
-}
-
-function ResizeIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M8 16h8V8" />
-      <path d="M9 15 16 8" />
-      <path d="M13 8h3v3" />
-    </svg>
-  );
-}
-
-function hasImageFiles(dataTransfer: DataTransfer) {
-  return Array.from(dataTransfer.items ?? []).some((item) => item.kind === "file" && item.type.startsWith("image/"));
-}
-
-function getPreviewWidth(aspectRatio: AspectRatio) {
-  const widths: Record<AspectRatio, number> = {
-    "16:9": 1040,
-    "4:3": 930,
-    "1:1": 760,
-    "3:4": 650,
-    "9:16": 520,
-  };
-  return widths[aspectRatio];
-}
-
-function getPreviewTitleHeight(size: number, trimmed: boolean) {
-  const multiplier = trimmed ? 1.22 : 1.16;
-  const maxHeight = trimmed ? 112 : 96;
-  return Math.round(Math.min(maxHeight, Math.max(42, size * multiplier)));
-}
-
-function getPreviewTitleXSpace(size: number) {
-  return Math.round(Math.min(64, Math.max(28, size * 0.78)));
-}
-
-function getTitleSafeInset(settings: BoardSettings, titleHeight: number) {
-  const outer = settings.trimBackground ? 0 : Math.max(18, settings.spacing * 2);
-  return Math.max(0, titleHeight + 32 - outer);
-}
-
-function getTitleInnerPad(size: number) {
-  return Math.round(Math.min(28, Math.max(16, size * 0.24)));
-}
-
-function getAspectNumber(aspectRatio: AspectRatio) {
-  const [width, height] = aspectRatio.split(":").map(Number);
-  return width / height;
-}
-
-function getPositionBounds(positions: Array<{ x: number; y: number; w: number; h: number }>) {
-  const minX = Math.min(...positions.map((position) => position.x));
-  const minY = Math.min(...positions.map((position) => position.y));
-  const maxX = Math.max(...positions.map((position) => position.x + position.w));
-  const maxY = Math.max(...positions.map((position) => position.y + position.h));
-  return { x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) };
-}
-
-function rectsIntersect(a: MarqueeRect, b: MarqueeRect) {
-  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
-}
-
-function getCropFrame(image: BoardImage, frameAspect: number) {
-  const imageAspect = image.width / image.height;
-  if (Math.abs(imageAspect - frameAspect) / frameAspect < 0.01) {
-    return { left: 0, top: 0, width: 100, height: 100 };
-  }
-
-  if (imageAspect > frameAspect) {
-    const width = (frameAspect / imageAspect) * 100;
-    return {
-      left: (100 - width) * (image.cropX / 100),
-      top: 0,
-      width,
-      height: 100,
-    };
-  }
-
-  const height = (imageAspect / frameAspect) * 100;
-  return {
-    left: 0,
-    top: (100 - height) * (image.cropY / 100),
-    width: 100,
-    height,
-  };
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function getReadableInk(background: string) {
-  return isDark(background) ? "#f8f2ea" : "#211b17";
 }
