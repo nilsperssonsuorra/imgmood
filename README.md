@@ -4,6 +4,8 @@ imgmood is a browser-based image board maker for moodboards, collages, visual re
 
 Live demo: https://imgmood.com
 
+![imgmood editing demo](docs/screenshots/imgmood-demo.gif)
+
 ## Highlights
 
 - Fully client-side image loading, layout, palette extraction, editing, and export
@@ -18,13 +20,13 @@ Live demo: https://imgmood.com
 
 ## Screenshots
 
-![imgmood editing demo](docs/screenshots/imgmood-demo.gif)
+| Default board | Custom layout |
+| --- | --- |
+| ![imgmood default board](docs/screenshots/default-readme.png) | ![imgmood custom layout](docs/screenshots/custom-readme.png) |
 
-![imgmood default board](docs/screenshots/default-readme.png)
-
-![imgmood custom layout](docs/screenshots/custom-readme.png)
-
-![imgmood exported output](docs/screenshots/output-readme.png)
+| Exported output |
+| --- |
+| ![imgmood exported output](docs/screenshots/output-readme.png) |
 
 ## Privacy
 
